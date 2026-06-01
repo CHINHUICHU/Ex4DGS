@@ -579,8 +579,85 @@ def readColmapSceneInfoNeural3DVideo(path, images, eval, args):
     return scene_info
 
 
+def readDynerfSceneInfo(path, images, eval, args):
+    from dataset_utils.etc_utils import posetow2c_matrcs
+
+    poses_bounds = np.load(os.path.join(path, "poses_bounds.npy"))
+    poses = poses_bounds[:, :15].reshape(-1, 3, 5)  # (N_cams, 3, 5)
+    bounds = poses_bounds[:, -2:]
+
+    H, W, focal = poses[0, :, -1]
+    near = float(bounds.min() * 0.95)
+    far = float(bounds.max() * 1.05)
+
+    # LLFF poses_bounds → w2c matrices
+    llffposes = poses.copy().transpose(1, 2, 0)  # (3, 5, N_cams)
+    w2c_matriclist = posetow2c_matrcs(llffposes)
+
+    FovX = focal2fov(focal, W)
+    FovY = focal2fov(focal, H)
+
+    startime = getattr(args, 'start_timestamp', 0)
+    endtime = getattr(args, 'end_timestamp', -1)
+
+    cam_dirs = sorted([
+        d for d in glob.glob(os.path.join(path, "cam*"))
+        if os.path.isdir(d) and not d.endswith('.mp4')
+    ])
+
+    cam_infos = []
+    uid = 0
+    for cam_idx, (cam_dir, w2c) in enumerate(zip(cam_dirs, w2c_matriclist)):
+        R = np.transpose(w2c[:3, :3])
+        T = w2c[:3, 3]
+
+        img_dir = os.path.join(cam_dir, "images")
+        if not os.path.isdir(img_dir):
+            img_dir = cam_dir
+
+        frame_paths = sorted(
+            glob.glob(os.path.join(img_dir, "*.png")),
+            key=lambda x: int(os.path.splitext(os.path.basename(x))[0])
+        )
+
+        for j, img_path in enumerate(frame_paths):
+            if j < startime or (endtime != -1 and j >= endtime):
+                continue
+            cam_infos.append(CameraInfo2(
+                uid=uid, R=R, T=T,
+                FovY=FovY, FovX=FovX,
+                image_path=img_path,
+                image_name=os.path.basename(img_path),
+                width=int(W), height=int(H),
+                near=near, far=far,
+                timestamp=(j - startime),
+                pose=None, hpdirecitons=None,
+                cxr=0.0, cyr=0.0
+            ))
+            uid += 1
+
+    train_cam_infos = [c for c in cam_infos if "cam00" not in c.image_path]
+    test_cam_infos  = [c for c in cam_infos if "cam00" in c.image_path]
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3D_downsample2.ply")
+    if not os.path.exists(ply_path):
+        ply_path = os.path.join(path, "points3D.ply")
+    pcd = fetchPly(ply_path)
+
+    return SceneInfo(
+        point_cloud=pcd,
+        train_cameras=train_cam_infos,
+        test_cameras=test_cam_infos,
+        nerf_normalization=nerf_normalization,
+        ply_path=ply_path,
+    )
+
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Technicolor": readColmapSceneInfoTechnicolor,
     "Neural3DVideo": readColmapSceneInfoNeural3DVideo,
+    "Dynerf": readDynerfSceneInfo,
 }
